@@ -33,17 +33,3 @@ A simple DICOM viewer built with React (Vite, JavaScript) and Cornerstone.
 npm install
 npm run dev
 ```
-
-Then open the local URL shown by Vite (usually `http://localhost:5173`).
-
-## Build
-
-```bash
-npm run build
-npm run preview
-```
-
-## Notes
-
-- This viewer currently targets local single-image DICOM loading via file input.
-- For production PACS workflows, you can extend this with stack loading, DICOMweb, measurements/annotations, and study/series navigation.
