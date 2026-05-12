@@ -7,6 +7,17 @@ import dicomParser from 'dicom-parser'
 import Hammer from 'hammerjs'
 import './App.css'
 
+const scrollToIndex = cornerstoneTools.importInternal('util/scrollToIndex')
+
+function buildFrameImageIds(baseImageId, totalFrames) {
+  if (!totalFrames || totalFrames < 2) {
+    return [baseImageId]
+  }
+
+  const [baseWithoutQuery] = baseImageId.split('?')
+  return Array.from({ length: totalFrames }, (_, index) => `${baseWithoutQuery}?frame=${index + 1}`)
+}
+
 const TOOL_CONFIG = [
   { id: 'Wwwc', label: 'WW/WL' },
   { id: 'Pan', label: 'Pan' },
@@ -20,15 +31,45 @@ function formatDicomDate(value) {
   if (!value || value.length !== 8) {
     return value || '-'
   }
-
   return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`
+}
+
+function getDeclaredNumberOfFrames(dataSet) {
+  const raw = dataSet?.string?.('x00280008')
+  const parsed = Number.parseInt(raw || '', 10)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1
+}
+
+async function resolveFrameCount(file, fallbackFrames) {
+  try {
+    const buffer = await file.arrayBuffer()
+    const dataSet = dicomParser.parseDicom(new Uint8Array(buffer))
+
+    const declaredFrames = Number.parseInt(dataSet.string('x00280008') || '', 10)
+    const pixelDataElement = dataSet.elements?.x7fe00010
+    const offsetTableFrames = pixelDataElement?.basicOffsetTable?.length
+
+    // Some encapsulated files report a high NumberOfFrames but expose fewer frame offsets.
+    // In that case we must cap to the offset table length or frame loads will fail.
+    if (Number.isInteger(declaredFrames) && declaredFrames > 0) {
+      // Prefer the larger valid count so single-file cine stacks don't collapse to 1/1.
+      return Math.max(declaredFrames, fallbackFrames || 1)
+    }
+
+    if (Number.isInteger(offsetTableFrames) && offsetTableFrames > 0) {
+      return offsetTableFrames
+    }
+  } catch {
+    // Ignore parse errors and use fallback from loaded image metadata.
+  }
+
+  return fallbackFrames
 }
 
 async function readDicomMetadata(file) {
   try {
     const buffer = await file.arrayBuffer()
     const dataSet = dicomParser.parseDicom(new Uint8Array(buffer))
-
     return {
       patientName: dataSet.string('x00100010') || '-',
       patientId: dataSet.string('x00100020') || '-',
@@ -45,7 +86,6 @@ async function readDicomMetadata(file) {
 
 function App() {
   const viewerRef = useRef(null)
-  const toolsInitializedRef = useRef(false)
   const fullscreenRef = useRef(null)
 
   const [activeTool, setActiveTool] = useState('Wwwc')
@@ -60,6 +100,8 @@ function App() {
   )
   const [urlLoading, setUrlLoading] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [currentFrame, setCurrentFrame] = useState(1)
+  const [frameType, setFrameType] = useState('unknown')
 
   useEffect(() => {
     cornerstoneWADOImageLoader.external.cornerstone = cornerstone
@@ -69,11 +111,10 @@ function App() {
     cornerstoneTools.external.cornerstoneMath = cornerstoneMath
     cornerstoneTools.external.Hammer = Hammer
 
-    if (!toolsInitializedRef.current) {
-      cornerstoneTools.init({ showSVGCursor: true })
-      toolsInitializedRef.current = true
-    }
+    cornerstoneTools.init({ showSVGCursor: true })
+  }, [])
 
+  useEffect(() => {
     const element = viewerRef.current
     if (!element) {
       return undefined
@@ -86,10 +127,7 @@ function App() {
     cornerstoneTools.addToolForElement(element, cornerstoneTools.LengthTool)
     cornerstoneTools.addToolForElement(element, cornerstoneTools.AngleTool)
     cornerstoneTools.addToolForElement(element, cornerstoneTools.EllipticalRoiTool)
-    cornerstoneTools.addToolForElement(
-      element,
-      cornerstoneTools.StackScrollMouseWheelTool,
-    )
+    cornerstoneTools.addToolForElement(element, cornerstoneTools.StackScrollMouseWheelTool)
 
     cornerstoneTools.addStackStateManager(element, ['stack'])
     cornerstoneTools.setToolActiveForElement(element, 'Wwwc', { mouseButtonMask: 1 })
@@ -106,10 +144,12 @@ function App() {
       const stackState = cornerstoneTools.getToolState(element, 'stack')
       const stack = stackState?.data?.[0]
       if (stack) {
+        const currentTotal = stack.imageIds.length
         setStackInfo({
           index: stack.currentImageIdIndex + 1,
-          total: stack.imageIds.length,
+          total: currentTotal,
         })
+        setCurrentFrame(stack.currentImageIdIndex + 1)
       }
     }
 
@@ -150,6 +190,30 @@ function App() {
     }
   }, [])
 
+  const handleSliderChange = (frameIndex) => {
+    const element = viewerRef.current
+    if (!element || !imageLoaded) return
+
+    const stackState = cornerstoneTools.getToolState(element, 'stack')
+    const stack = stackState?.data?.[0]
+    if (!stack || !stack.imageIds) return
+
+    const maxFrame = stackInfo.total > 0 ? stackInfo.total : stack.imageIds.length
+    const clampedFrame = Math.max(1, Math.min(frameIndex, maxFrame))
+    const targetIndex = clampedFrame - 1
+    setCurrentFrame(clampedFrame)
+
+    if (targetIndex === stack.currentImageIdIndex) return
+
+    try {
+      scrollToIndex(element, targetIndex)
+      setError('')
+    } catch (err) {
+      console.error(err)
+      setError('Could not load this frame for the current DICOM file.')
+    }
+  }
+
   const loadFiles = async (files) => {
     if (files.length === 0) {
       return
@@ -172,10 +236,34 @@ function App() {
       cornerstone.displayImage(element, firstImage)
       cornerstone.fitToWindow(element)
 
+      let stackImageIds = imageIds
+      let totalFrames = imageIds.length
+      const imageFrameCount = Number(firstImage.numFrames) || 1
+      if (sortedFiles.length === 1) {
+        let declaredFrames = 1
+        try {
+          const buffer = await sortedFiles[0].arrayBuffer()
+          const dataSet = dicomParser.parseDicom(new Uint8Array(buffer))
+          declaredFrames = getDeclaredNumberOfFrames(dataSet)
+        } catch {
+          declaredFrames = 1
+        }
+
+        const candidateFrames = Math.max(imageFrameCount, declaredFrames)
+        if (candidateFrames > 1) {
+          totalFrames = await resolveFrameCount(sortedFiles[0], candidateFrames)
+          stackImageIds = buildFrameImageIds(imageIds[0], totalFrames)
+        }
+
+        setFrameType(declaredFrames > 1 ? 'multi-frame' : 'single-frame')
+      } else {
+        setFrameType('multi-file stack')
+      }
+
       cornerstoneTools.clearToolState(element, 'stack')
       cornerstoneTools.addToolState(element, 'stack', {
         currentImageIdIndex: 0,
-        imageIds,
+        imageIds: stackImageIds,
       })
 
       const firstMetadata = await readDicomMetadata(sortedFiles[0])
@@ -188,7 +276,8 @@ function App() {
         maxPixelValue: firstImage.maxPixelValue,
       })
 
-      setStackInfo({ index: 1, total: imageIds.length })
+      setStackInfo({ index: 1, total: totalFrames })
+      setCurrentFrame(1)
       setImageLoaded(true)
       setActiveTool('Wwwc')
     } catch (err) {
@@ -198,6 +287,7 @@ function App() {
       setViewport(null)
       setStackInfo({ index: 0, total: 0 })
       setMetadata(null)
+      setFrameType('unknown')
       setError('Could not load these DICOM files. Try another dataset.')
     }
   }
@@ -232,9 +322,7 @@ function App() {
       await loadFiles([file])
     } catch (err) {
       console.error(err)
-      setError(
-        'Could not load DICOM from URL. Check endpoint/CORS and try again.',
-      )
+      setError('Could not load DICOM from URL. Check endpoint/CORS and try again.')
     } finally {
       setUrlLoading(false)
     }
@@ -271,7 +359,7 @@ function App() {
   return (
     <main className="viewer-page">
       <header className="compact-header">
-        <h1>KOS DICOM Viewwer</h1>
+        <h1>KOS DICOM Viewer</h1>
       </header>
 
       <section className="top-bar" aria-label="Input controls">
@@ -324,6 +412,20 @@ function App() {
           </button>
         </aside>
 
+        <div className="frame-slider" aria-label="Frame navigation">
+          <input
+            type="range"
+            min="1"
+            max={stackInfo.total > 0 ? stackInfo.total : 1}
+            value={currentFrame}
+            onChange={(e) => handleSliderChange(Number(e.target.value))}
+            disabled={!imageLoaded || stackInfo.total < 2}
+          />
+          <span className="frame-label">
+            {currentFrame} / {stackInfo.total || '-'}
+          </span>
+        </div>
+
         <div className="viewer-stage" ref={fullscreenRef}>
           <div className="viewport-wrap">
             <div ref={viewerRef} className="dicom-viewport" />
@@ -332,7 +434,7 @@ function App() {
             )}
             {imageLoaded && stackInfo.total > 1 && (
               <div className="stack-hint">
-                Slice {stackInfo.index}/{stackInfo.total} (mouse wheel to scroll)
+                Frame {stackInfo.index}/{stackInfo.total}
               </div>
             )}
           </div>
@@ -375,6 +477,10 @@ function App() {
                 <div>
                   <dt>Zoom</dt>
                   <dd>{viewport?.zoom ?? '-'}</dd>
+                </div>
+                <div>
+                  <dt>Frame Type</dt>
+                  <dd>{frameType}</dd>
                 </div>
                 <div>
                   <dt>Slice</dt>
