@@ -111,7 +111,7 @@ button:disabled {
 
 .workspace-layout {
   display: grid;
-  grid-template-columns: 190px auto minmax(0, 1fr) 360px;
+  grid-template-columns: 190px minmax(0, 1fr) 360px;
   gap: 12px;
   align-items: start;
   min-height: 0;
@@ -146,6 +146,22 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.icon-button {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-button svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
 }
 
 .frame-slider input[type="range"] {
@@ -193,6 +209,9 @@ button:disabled {
   min-width: 0;
   height: 100%;
   min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 12px;
 }
 
 .viewer-stage:fullscreen {
@@ -204,6 +223,10 @@ button:disabled {
 .viewer-stage:fullscreen .dicom-viewport {
   min-height: calc(100vh - 24px);
   height: calc(100vh - 24px);
+}
+
+.viewer-stage:fullscreen .frame-slider {
+  display: none;
 }
 
 .viewport-wrap {

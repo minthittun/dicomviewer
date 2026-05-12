@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import cornerstone from 'cornerstone-core'
 import cornerstoneMath from 'cornerstone-math'
 import cornerstoneTools from 'cornerstone-tools'
@@ -102,6 +102,7 @@ function App() {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [currentFrame, setCurrentFrame] = useState(1)
   const [frameType, setFrameType] = useState('unknown')
+  const [isPlaying, setIsPlaying] = useState(false)
 
   useEffect(() => {
     cornerstoneWADOImageLoader.external.cornerstone = cornerstone
@@ -190,7 +191,13 @@ function App() {
     }
   }, [])
 
-  const handleSliderChange = (frameIndex) => {
+  useEffect(() => {
+    if (!imageLoaded || stackInfo.total < 2) {
+      setIsPlaying(false)
+    }
+  }, [imageLoaded, stackInfo.total])
+
+  const handleSliderChange = useCallback((frameIndex) => {
     const element = viewerRef.current
     if (!element || !imageLoaded) return
 
@@ -212,7 +219,20 @@ function App() {
       console.error(err)
       setError('Could not load this frame for the current DICOM file.')
     }
-  }
+  }, [imageLoaded, stackInfo.total])
+
+  useEffect(() => {
+    if (!isPlaying || !imageLoaded || stackInfo.total < 2) {
+      return undefined
+    }
+
+    const timer = window.setInterval(() => {
+      const nextFrame = currentFrame >= stackInfo.total ? 1 : currentFrame + 1
+      handleSliderChange(nextFrame)
+    }, 120)
+
+    return () => window.clearInterval(timer)
+  }, [isPlaying, imageLoaded, currentFrame, stackInfo.total, handleSliderChange])
 
   const loadFiles = async (files) => {
     if (files.length === 0) {
@@ -278,6 +298,7 @@ function App() {
 
       setStackInfo({ index: 1, total: totalFrames })
       setCurrentFrame(1)
+      setIsPlaying(false)
       setImageLoaded(true)
       setActiveTool('Wwwc')
     } catch (err) {
@@ -288,6 +309,7 @@ function App() {
       setStackInfo({ index: 0, total: 0 })
       setMetadata(null)
       setFrameType('unknown')
+      setIsPlaying(false)
       setError('Could not load these DICOM files. Try another dataset.')
     }
   }
@@ -412,20 +434,6 @@ function App() {
           </button>
         </aside>
 
-        <div className="frame-slider" aria-label="Frame navigation">
-          <input
-            type="range"
-            min="1"
-            max={stackInfo.total > 0 ? stackInfo.total : 1}
-            value={currentFrame}
-            onChange={(e) => handleSliderChange(Number(e.target.value))}
-            disabled={!imageLoaded || stackInfo.total < 2}
-          />
-          <span className="frame-label">
-            {currentFrame} / {stackInfo.total || '-'}
-          </span>
-        </div>
-
         <div className="viewer-stage" ref={fullscreenRef}>
           <div className="viewport-wrap">
             <div ref={viewerRef} className="dicom-viewport" />
@@ -437,6 +445,39 @@ function App() {
                 Frame {stackInfo.index}/{stackInfo.total}
               </div>
             )}
+          </div>
+
+          <div className="frame-slider" aria-label="Frame navigation">
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setIsPlaying((prev) => !prev)}
+              disabled={!imageLoaded || stackInfo.total < 2}
+              aria-label={isPlaying ? 'Pause playback' : 'Play playback'}
+              title={isPlaying ? 'Pause playback' : 'Play playback'}
+            >
+              {isPlaying ? (
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="6" y="5" width="4" height="14" rx="1" />
+                  <rect x="14" y="5" width="4" height="14" rx="1" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              )}
+            </button>
+            <input
+              type="range"
+              min="1"
+              max={stackInfo.total > 0 ? stackInfo.total : 1}
+              value={currentFrame}
+              onChange={(e) => handleSliderChange(Number(e.target.value))}
+              disabled={!imageLoaded || stackInfo.total < 2}
+            />
+            <span className="frame-label">
+              {currentFrame} / {stackInfo.total || '-'}
+            </span>
           </div>
         </div>
 
